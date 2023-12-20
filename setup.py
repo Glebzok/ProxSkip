@@ -7,6 +7,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         'opt_methods @ git+https://github.com/konstmish/opt_methods.git',
+        'jupyter',
         'matplotlib',
         'numpy',
         'ray',
