@@ -1,0 +1,86 @@
+import copy
+import numpy as np
+import ray
+import psutil
+
+from optmethods.optimizer import StochasticOptimizer
+from proxskip.methods.utils import Worker
+
+
+class Scaffold(StochasticOptimizer):
+    """
+    Scaffold (local SGD with variance control).
+    
+    Arguments:
+        lr (float, optional): an estimate of the inverse smoothness constant
+        lr_decay_coef (float, optional): the coefficient in front of the number of finished iterations
+            in the denominator of step-size. For strongly convex problems, a good value
+            is mu/2, where mu is the strong convexity constant
+        lr_decay_power (float, optional): the power to exponentiate the number of finished iterations
+            in the denominator of step-size. For strongly convex problems, a good value is 1 (default: 1)
+        it_start_decay (int, optional): how many iterations the step-size is kept constant
+            By default, will be set to have about 2.5% of iterations with the step-size equal to lr0
+        batch_size (int, optional): the number of samples from the function to be used at each iteration
+    """
+    def __init__(self, it_local, n_workers=None, iid=False, lr0=None, lr_max=np.inf, 
+                 lr_decay_coef=0, lr_decay_power=1, it_start_decay=None,
+                 batch_size=1, losses=None, global_lr=1., cohort_size=None, *args, **kwargs):
+        super(Scaffold, self).__init__(*args, **kwargs)
+        self.it_local = it_local
+        if n_workers is None:
+            n_workers = psutil.cpu_count(logical=False)
+        if cohort_size is None:
+            cohort_size = n_workers
+        self.n_workers = n_workers
+        self.cohort_size = cohort_size
+        self.iid = iid
+        self.lr0 = lr0
+        self.lr_max = lr_max
+        self.lr_decay_coef = lr_decay_coef
+        self.lr_decay_power = lr_decay_power
+        self.it_start_decay = it_start_decay
+        self.batch_size = batch_size
+        self.losses = losses
+        self.global_lr = global_lr
+        self.trace.cs = []
+        
+    def step(self):
+        denom_const = 1 / self.lr0
+        lr_decayed = 1 / (denom_const + self.it_local*self.lr_decay_coef*max(0, self.it-self.it_start_decay)**self.lr_decay_power)
+        if lr_decayed < 0:
+            lr_decayed = np.inf 
+        self.lr = min(lr_decayed, self.lr_max)
+        x_id = ray.put(self.x)
+        c_id = ray.put(self.c)
+        if self.cohort_size == self.n_workers:
+            x_new = np.mean(ray.get([worker.run_scaffold.remote(x_id, self.lr, c_id) for worker in self.workers]), axis=0)
+            c_new = np.mean(ray.get([worker.get_control_var.remote() for worker in self.workers]), axis=0)
+        else:
+            cohort = np.random.choice(self.n_workers, self.cohort_size, replace=False)
+            x_new = np.mean(ray.get([self.workers[i].run_scaffold.remote(x_id, self.lr, c_id) for i in cohort]), axis=0)
+            c_new = np.mean(ray.get([self.workers[i].get_control_var.remote() for i in cohort]), axis=0)
+        if self.global_lr == 1:
+            self.x = x_new
+        else:
+            self.x += self.global_lr * (x_new - self.x)
+        self.c += self.cohort_size / self.n_workers * (c_new - self.c)
+    
+    def init_run(self, *args, **kwargs):
+        super(Scaffold, self).init_run(*args, **kwargs)
+        if self.it_start_decay is None and np.isfinite(self.it_max):
+            self.it_start_decay = self.it_max // 40 if np.isfinite(self.it_max) else 0
+        self.c = self.x * 0
+        if self.iid:
+            loss_id = ray.put(self.loss)
+            self.workers = [Worker.remote(shuffle=False, loss=loss_id, it_local=self.it_local, batch_size=self.batch_size) for _ in range(self.n_workers)]
+        else:
+            loss_ids = [ray.put(self.losses[i]) for i in range(self.n_workers)]
+            self.workers = [Worker.remote(shuffle=False, loss=loss, it_local=self.it_local, batch_size=self.batch_size) for loss in loss_ids]
+        
+    def terminate_workers(self):
+        for worker in self.workers:
+            ray.kill(worker)
+            
+    def update_trace(self, first_iterations=10):
+        super(Scaffold, self).update_trace()
+        self.trace.cs.append(copy.deepcopy(self.c))
