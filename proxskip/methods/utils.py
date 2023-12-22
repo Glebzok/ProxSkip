@@ -14,12 +14,12 @@ class Worker:
         self.h = None
         self.rng_skip = np.random.default_rng(42) # random number generator for random synchronizations
     
-    def run_local(self, x, lr):
+    def run_local(self, x, lr, proba=None):
         self.x = x * 1.
         if self.shuffle:
             self.run_local_shuffle(lr)
         elif self.prox_skip:
-            self.run_prox_skip(lr)
+            self.run_prox_skip(lr, proba)
         else:
             self.run_local_sgd(lr)
         return self.x
@@ -54,15 +54,17 @@ class Worker:
         self.c += 1 / (self.it_local * lr) * (x - self.x) - c
         return self.x
 
-    def run_prox_skip(self, lr):
-        p = 1 / self.it_local
+    def run_prox_skip(self, lr, proba):
+        # p = 1 / self.it_local
         if self.h is None:
             # first iteration
             self.h = self.x * 0. # initialize zero vector of the same dimension
         else:
             # update the gradient estimate 
-            self.h += p / lr * (self.x - self.x_before_averaing)
-        it_local = self.rng_skip.geometric(p=p) # since all workers use the same random seed, this number is the same for all of them
+            # self.h += p / lr * (self.x - self.x_before_averaing)
+        # it_local = self.rng_skip.geometric(p=p) # since all workers use the same random seed, this number is the same for all of them
+            self.h += proba / lr * (self.x - self.x_before_averaing)
+        it_local = self.rng_skip.geometric(p=proba) # since all workers use the same random seed, this number is the same for all of them
 
         for i in range(it_local):
             if self.batch_size is None:

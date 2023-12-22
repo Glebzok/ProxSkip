@@ -4,7 +4,7 @@ import ray
 import psutil
 
 from optmethods.optimizer import StochasticOptimizer
-from proxskip.methods.utils import Worker
+from methods.utils import Worker
 
 
 class ProxSkip(StochasticOptimizer):
@@ -54,7 +54,7 @@ class ProxSkip(StochasticOptimizer):
         x_id = ray.put(self.x)
         
         if self.cohort_size == self.n_workers:
-            self.x = np.mean(ray.get([worker.run_local.remote(x_id, self.lr) for worker in self.workers]), axis=0)
+            self.x = np.mean(ray.get([worker.run_local.remote(x_id, self.lr, proba=self.proba) for worker in self.workers]), axis=0)
             self.h = ray.get([worker.get_h.remote() for worker in self.workers])       
         else:
             cohort = np.random.choice(self.n_workers, self.cohort_size, replace=False)
